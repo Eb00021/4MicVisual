@@ -711,16 +711,19 @@ class AudioVisualizer(QtWidgets.QMainWindow):
                             x_data_full = x_array
                             y_data_full = y_array
                             
-                            # Normalize time to 0-0.3s window for continuous display
+                            # Normalize time to adjusted window for continuous display
                             # Use the oldest sample time as reference (time 0)
                             if len(x_data_full) > 0:
                                 # Find the minimum time in the buffer (oldest sample)
                                 min_time = x_data_full[0]
                                 # Normalize all times to start from 0
                                 x_data_normalized = x_data_full - min_time
-                                # The data should naturally be within 0-0.3s due to deque maxlen
+                                # Calculate adjusted window size based on sample rate adjustment
+                                # When adjustment is 0.69x, time accumulates slower, so less time data in same real time
+                                adjusted_window = self.time_plot_window_seconds * max(self.sample_rate_adjustment, 0.01)
+                                # The data should naturally be within the adjusted window due to deque maxlen
                                 # But clamp to ensure it's within bounds
-                                x_data_normalized = np.clip(x_data_normalized, 0.0, self.time_plot_window_seconds)
+                                x_data_normalized = np.clip(x_data_normalized, 0.0, adjusted_window)
                                 
                                 # Use all points for high resolution (no downsampling for continuous line)
                                 x_data_display = x_data_normalized
@@ -852,13 +855,18 @@ class AudioVisualizer(QtWidgets.QMainWindow):
                             # Time plot mode: unlock X-axis limits and auto-scale
                             view_box.setLimits(xMin=None, xMax=None, minXRange=None, maxXRange=None)
                             
-                            # Time plot mode: always use fixed 0-0.3s range to fill the plot width
+                            # Time plot mode: adjust X-axis range based on sample rate adjustment
+                            # When sample_rate_adjustment is higher (faster), more time accumulates in the same real time
+                            # When sample_rate_adjustment is lower (slower), less time accumulates in the same real time
+                            # So the X-axis width should be: base_window * adjustment
+                            # Example: 0.3s window * 0.69x = 0.207s of time data accumulated
                             x_min = 0.0
-                            x_max = self.time_plot_window_seconds  # Always 0.3 seconds
+                            x_max = self.time_plot_window_seconds * max(self.sample_rate_adjustment, 0.01)  # Multiply, not divide!
                             
                             # Store X-axis range (no smoothing needed since it's fixed)
                             if not hasattr(self, '_time_plot_x_ranges'):
-                                self._time_plot_x_ranges = [(0, self.time_plot_window_seconds)] * self.channels
+                                adjusted_window = self.time_plot_window_seconds * max(self.sample_rate_adjustment, 0.01)
+                                self._time_plot_x_ranges = [(0, adjusted_window)] * self.channels
                             
                             self._time_plot_x_ranges[i] = (x_min, x_max)
                             
@@ -1178,7 +1186,10 @@ class AudioVisualizer(QtWidgets.QMainWindow):
                     self.time_plot_update_counter = [0] * self.channels
                     self.time_plot_start_time = time.time()
                     self.time_plot_last_clear_time = None  # Reset clear timer
-                    self._time_plot_x_ranges = [(0, self.time_plot_window_seconds)] * self.channels  # Start with 0.3s range
+                    # Initialize X ranges with sample rate adjustment
+                    # Multiply: when adjustment is 0.69x, time accumulates slower, so less time data
+                    adjusted_window = self.time_plot_window_seconds * max(new_sample_rate_adjustment, 0.01)
+                    self._time_plot_x_ranges = [(0, adjusted_window)] * self.channels
                     # Restore original setRange for all plots to allow X-axis scaling
                     for i in range(self.channels):
                         if i < len(self.plot_widgets):
@@ -1224,6 +1235,12 @@ class AudioVisualizer(QtWidgets.QMainWindow):
                             view_box.setLimits(xMin=0, xMax=512, minXRange=512, maxXRange=512)
                 
                 self.time_plot_mode = new_time_plot_mode
+                # If sample rate adjustment changed, invalidate cache so data gets renormalized
+                if self.sample_rate_adjustment != new_sample_rate_adjustment:
+                    # Mark all caches as dirty to force renormalization with new window size
+                    for i in range(self.channels):
+                        self.time_plot_cache_dirty[i] = True
+                        self.time_plot_cache[i] = None
                 self.sample_rate_adjustment = new_sample_rate_adjustment
                 # Update FPS lock if changed
                 new_fps_lock_ms = dialog.get_fps_lock_ms()
